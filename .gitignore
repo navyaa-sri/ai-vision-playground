@@ -1,0 +1,6 @@
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
+
+node_modules/
+.DS_Store
+Thumbs.db

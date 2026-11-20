@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Vision Playground</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Pixel grids: square cells, 1px "grid lines" from the container background. */
+    .pixel-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 1px;
+      padding: 1px;
+      background: #cbd5e1;            /* slate-300 grid lines */
+      border-radius: 0.75rem;
+      overflow: hidden;
+      container-type: inline-size;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .pixel-grid { touch-action: none; }   /* drag paints/inspects instead of scrolling */
+    .pixel-grid.drawable { cursor: crosshair; }
+    .pixel-grid.inspectable { cursor: pointer; }
+    .cell {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: clamp(6px, 2.6cqw, 12px);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      line-height: 1;
+      transition: background-color 80ms ease;
+    }
+    /* Neighbourhood highlight on the input grid. */
+    .cell.hl::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: rgba(99, 102, 241, 0.38);   /* indigo tint works on dark and bright */
+      box-shadow: inset 0 0 0 1.5px rgba(79, 70, 229, 0.9);
+      pointer-events: none;
+    }
+    .cell.hl-center::before {
+      background: rgba(99, 102, 241, 0.55);
+      box-shadow: inset 0 0 0 2.5px #4338ca;
+    }
+    /* Selected output cell. */
+    .cell.selected {
+      box-shadow: inset 0 0 0 2.5px #6366f1, 0 0 0 2px #6366f1;
+      z-index: 1;
+    }
+    /* Clipped markers: small dot in the top-right corner. */
+    .cell.clip-high::after,
+    .cell.clip-low::after {
+      content: "";
+      position: absolute;
+      top: 10%;
+      right: 10%;
+      width: 14%;
+      height: 14%;
+      border-radius: 9999px;
+      opacity: 0.75;
+      pointer-events: none;
+    }
+    .cell.clip-high::after { background: #f59e0b; }  /* amber: raw > 255 */
+    .cell.clip-low::after  { background: #0ea5e9; }  /* sky:   raw < 0   */
+    .pill[aria-pressed="true"] {
+      background: #4f46e5;
+      color: #fff;
+      border-color: #4f46e5;
+      box-shadow: 0 1px 2px rgba(79, 70, 229, 0.35);
+    }
+    .seg[aria-pressed="true"] {
+      background: #fff;
+      color: #0f172a;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.15);
+    }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-800 antialiased">
+  <div class="mx-auto max-w-7xl px-4 py-6 sm:py-10">
+
+    <!-- Header -->
+    <header class="mb-6 sm:mb-8">
+      <div class="flex items-center gap-3">
+        <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-indigo-600 text-white shadow-sm">
+          <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/>
+            <rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5" fill="currentColor"/>
+          </svg>
+        </div>
+        <h1 class="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">AI Vision Playground</h1>
+      </div>
+      <p class="mt-2 max-w-3xl text-slate-600">
+        A computer sees an image as a grid of numbers. Slide a 3&times;3 filter over it &mdash; multiply, add up &mdash;
+        and you get a new image that highlights features like edges.
+      </p>
+    </header>
+
+    <!-- Missing engine banner -->
+    <div id="engine-banner" hidden
+         class="mb-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-red-800 shadow-sm">
+      <p class="font-semibold">filter-engine/convolution.js not found</p>
+      <p class="text-sm text-red-700">You can still draw and pick filters, but the filtered output needs
+        <code class="rounded bg-red-100 px-1">window.Convolution</code>. Check that the file exists next to this folder and reload.</p>
+    </div>
+
+    <main class="grid grid-cols-1 gap-5 lg:grid-cols-3 lg:gap-6">
+
+      <!-- 1. Input image -->
+      <section class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="flex items-center gap-2 text-lg font-semibold text-slate-900">
+            <span class="grid h-6 w-6 place-items-center rounded-full bg-slate-900 text-xs font-bold text-white">1</span>
+            Input image
+          </h2>
+          <div class="flex rounded-lg bg-slate-100 p-0.5 text-xs font-medium text-slate-500" role="group" aria-label="Input mode">
+            <button type="button" id="mode-draw" class="seg rounded-md px-2.5 py-1" aria-pressed="true">Draw</button>
+            <button type="button" id="mode-inspect" class="seg rounded-md px-2.5 py-1" aria-pressed="false">Inspect</button>
+          </div>
+        </div>
+        <p id="input-hint" class="mb-3 text-sm text-slate-500">Click a pixel to flip it, or drag to paint.</p>
+
+        <div id="input-grid" class="pixel-grid drawable" aria-label="Input pixel grid"></div>
+
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <button type="button" data-preset="smiley" class="preset-btn rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium shadow-sm hover:bg-slate-50 active:bg-slate-100">Smiley</button>
+          <button type="button" data-preset="house" class="preset-btn rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium shadow-sm hover:bg-slate-50 active:bg-slate-100">House</button>
+          <button type="button" data-preset="seven" class="preset-btn rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium shadow-sm hover:bg-slate-50 active:bg-slate-100">7</button>
+          <button type="button" id="clear-btn" class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-rose-600 shadow-sm hover:bg-rose-50 active:bg-rose-100">Clear</button>
+          <label class="ml-auto flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" id="show-values" class="h-4 w-4 rounded border-slate-300 accent-indigo-600" />
+            Show numbers
+          </label>
+        </div>
+        <p id="preset-info" class="mt-3 text-xs text-slate-500"></p>
+      </section>
+
+      <!-- 2. Filter -->
+      <section class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
+        <h2 class="mb-3 flex items-center gap-2 text-lg font-semibold text-slate-900">
+          <span class="grid h-6 w-6 place-items-center rounded-full bg-slate-900 text-xs font-bold text-white">2</span>
+          Filter (3&times;3 kernel)
+        </h2>
+        <div id="kernel-pills" class="flex flex-wrap gap-2" role="group" aria-label="Choose a kernel"></div>
+
+        <div class="mt-5 flex justify-center">
+          <div id="kernel-grid" class="grid w-full max-w-[16rem] grid-cols-3 gap-2"></div>
+        </div>
+
+        <div class="mt-5 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
+          <p id="kernel-name" class="font-semibold text-slate-900"></p>
+          <p id="kernel-desc" class="mt-1 text-sm text-slate-600"></p>
+        </div>
+
+        <div class="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+          <span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded bg-emerald-100 ring-1 ring-emerald-300"></span>positive weight</span>
+          <span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded bg-rose-100 ring-1 ring-rose-300"></span>negative weight</span>
+          <span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded bg-slate-100 ring-1 ring-slate-300"></span>zero</span>
+        </div>
+        <p class="mt-4 text-sm leading-relaxed text-slate-600">
+          For every output pixel, the kernel sits on top of the matching input pixel and its 8 neighbours.
+          Each pixel is multiplied by the weight above it, and the 9 products are added together.
+          Pixels beyond the edge count as 0.
+        </p>
+      </section>
+
+      <!-- 3. Filtered output + Inspector -->
+      <section class="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 sm:p-5">
+        <h2 class="mb-3 flex items-center gap-2 text-lg font-semibold text-slate-900">
+          <span class="grid h-6 w-6 place-items-center rounded-full bg-slate-900 text-xs font-bold text-white">3</span>
+          Filtered output
+        </h2>
+        <p class="mb-3 text-sm text-slate-500">Click any output pixel to see how it was calculated.</p>
+
+        <div id="output-grid" class="pixel-grid inspectable" aria-label="Filtered output grid"></div>
+
+        <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+          <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-amber-500"></span>clipped (sum &gt; 255)</span>
+          <span class="flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-sky-500"></span>clipped (sum &lt; 0)</span>
+        </div>
+
+        <div id="inspector" class="mt-5 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200">
+          <div class="mb-3 flex items-baseline justify-between gap-2">
+            <h3 class="font-semibold text-slate-900">Inspector</h3>
+            <span id="insp-title" class="text-xs font-medium text-indigo-600"></span>
+          </div>
+          <div id="insp-body"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="mt-8 text-center text-xs text-slate-400">
+      Pixel values run from 0 (black) to 255 (white). Output values outside that range are clipped for display.
+    </footer>
+  </div>
+
+  <!-- Dependencies (plain scripts so file:// works) -->
+  <script src="../presets/shapes.js"></script>
+  <script src="../filter-engine/convolution.js"></script>
+
+  <script>
+  (function () {
+    "use strict";
+
+    const SIZE = 12;
+    const NINTH = 1 / 9;
+
+    const KERNELS = {
+      identity: {
+        name: "Identity",
+        description: "Copies each pixel unchanged: only the centre weight is 1.",
+        kernel: [[0, 0, 0], [0, 1, 0], [0, 0, 0]],
+      },
+      edge: {
+        name: "Edge detect",
+        description: "Lights up where a pixel differs from its neighbours, so outlines appear and flat areas go dark.",
+        kernel: [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]],
+      },
+      sobelX: {
+        name: "Vertical edges",
+        description: "Compares the right side with the left side, so it responds to vertical edges (dark-to-bright going right).",
+        kernel: [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+      },
+      sobelY: {
+        name: "Horizontal edges",
+        description: "Compares the row below with the row above, so it responds to horizontal edges (dark-to-bright going down).",
+        kernel: [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+      },
+      sharpen: {
+        name: "Sharpen",
+        description: "Boosts the centre pixel and subtracts its neighbours, making contrast at edges stronger.",
+        kernel: [[0, -1, 0], [-1, 5, -1], [0, -1, 0]],
+      },
+      blur: {
+        name: "Box blur",
+        description: "Replaces each pixel with the average of its 3×3 neighbourhood, softening sharp edges.",
+        kernel: [[NINTH, NINTH, NINTH], [NINTH, NINTH, NINTH], [NINTH, NINTH, NINTH]],
+      },
+      emboss: {
+        name: "Emboss",
+        description: "Brightens one diagonal side of each edge and darkens the other, like a raised stamp.",
+        kernel: [[-2, -1, 0], [-1, 1, 1], [0, 1, 2]],
+      },
+    };
+
+    const Conv = window.Convolution || null;
+    const Presets = window.PRESET_GRIDS || {};
+
+    const state = {
+      grid: emptyGrid(),
+      kernelId: "edge",
+      selected: { row: 6, col: 6 },
+      mode: "draw",          // "draw" | "inspect"
+      showValues: false,
+      presetId: null,
+      pointer: null,         // null | { kind: "paint", value } | { kind: "inspect" }
+      output: null,          // last raw output grid
+    };
+
+    // ---------- DOM refs ----------
+    const $ = (id) => document.getElementById(id);
+    const inputGridEl = $("input-grid");
+    const outputGridEl = $("output-grid");
+    const kernelGridEl = $("kernel-grid");
+    const kernelPillsEl = $("kernel-pills");
+    const inputCells = [];
+    const outputCells = [];
+
+    // ---------- Helpers ----------
+    function emptyGrid() {
+      return Array.from({ length: SIZE }, () => new Array(SIZE).fill(0));
+    }
+    function copyGrid(grid) {
+      return grid.map((row) => row.slice());
+    }
+    function round2(n) {
+      const r = Math.round(n * 100) / 100;
+      return Object.is(r, -0) ? 0 : r;
+    }
+    function fmt(n) {
+      return String(round2(n));
+    }
+    function fmtWeight(w) {
+      if (Number.isInteger(w)) return String(w);
+      for (let d = 2; d <= 16; d++) {
+        const num = w * d;
+        if (Math.abs(num - Math.round(num)) < 1e-9) return `${Math.round(num)}/${d}`;
+      }
+      return fmt(w);
+    }
+    function clamp(v) {
+      return Conv ? Conv.clampPixel(v) : Math.max(0, Math.min(255, Math.round(v)));
+    }
+    function gray(v) {
+      return `rgb(${v}, ${v}, ${v})`;
+    }
+    function textOn(v) {
+      return v >= 128 ? "#0f172a" : "#f8fafc";
+    }
+    function weightClasses(w) {
+      if (w > 0) return "bg-emerald-50 text-emerald-700 ring-emerald-200";
+      if (w < 0) return "bg-rose-50 text-rose-700 ring-rose-200";
+      return "bg-slate-50 text-slate-400 ring-slate-200";
+    }
+    function activeKernel() {
+      return KERNELS[state.kernelId].kernel;
+    }
+    function inBounds(r, c) {
+      return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+    }
+
+    // ---------- Build static DOM ----------
+    function buildGrid(container, store, kind) {
+      for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) {
+          const el = document.createElement("div");
+          el.className = "cell";
+          el.dataset.r = r;
+          el.dataset.c = c;
+          el.dataset.kind = kind;
+          container.appendChild(el);
+          store.push(el);
+        }
+      }
+    }
+
+    function buildKernelPills() {
+      for (const [id, k] of Object.entries(KERNELS)) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.kernel = id;
+        b.className = "pill rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition hover:border-indigo-300 hover:text-indigo-700";
+        b.textContent = k.name;
+        b.title = k.description;
+        b.addEventListener("click", () => setKernel(id));
+        kernelPillsEl.appendChild(b);
+      }
+    }
+
+    // ---------- Rendering ----------
+    function renderInput() {
+      const { row: sr, col: sc } = state.selected;
+      inputCells.forEach((el) => {
+        const r = +el.dataset.r, c = +el.dataset.c;
+        const v = state.grid[r][c];
+        el.style.backgroundColor = gray(v);
+        el.style.color = textOn(v);
+        el.textContent = state.showValues ? v : "";
+        el.title = `Input (row ${r}, col ${c}) = ${v}`;
+        const near = Math.abs(r - sr) <= 1 && Math.abs(c - sc) <= 1;
+        el.classList.toggle("hl", near);
+        el.classList.toggle("hl-center", r === sr && c === sc);
+      });
+    }
+
+    function renderKernel() {
+      const k = KERNELS[state.kernelId];
+      kernelPillsEl.querySelectorAll(".pill").forEach((b) => {
+        b.setAttribute("aria-pressed", String(b.dataset.kernel === state.kernelId));
+      });
+      kernelGridEl.innerHTML = "";
+      k.kernel.flat().forEach((w) => {
+        const d = document.createElement("div");
+        d.className = `flex aspect-square items-center justify-center rounded-xl text-xl font-bold tabular-nums ring-1 ${weightClasses(w)}`;
+        d.textContent = fmtWeight(w);
+        d.title = `weight ${fmt(w)}`;
+        kernelGridEl.appendChild(d);
+      });
+      $("kernel-name").textContent = k.name;
+      $("kernel-desc").textContent = k.description;
+    }
+
+    function computeOutput() {
+      if (!Conv) return null;
+      try {
+        return Conv.applyKernel(state.grid, activeKernel());
+      } catch (err) {
+        console.error("applyKernel failed:", err);
+        return null;
+      }
+    }
+
+    function renderOutput() {
+      state.output = computeOutput();
+      const { row: sr, col: sc } = state.selected;
+      outputCells.forEach((el) => {
+        const r = +el.dataset.r, c = +el.dataset.c;
+        el.classList.toggle("selected", r === sr && c === sc);
+        if (!state.output) {
+          el.style.backgroundColor = "#e2e8f0";
+          el.style.color = "#94a3b8";
+          el.textContent = "";
+          el.title = "Output unavailable";
+          el.classList.remove("clip-high", "clip-low");
+          return;
+        }
+        const raw = state.output[r][c];
+        const v = clamp(raw);
+        el.style.backgroundColor = gray(v);
+        el.style.color = textOn(v);
+        el.textContent = v;
+        el.classList.toggle("clip-high", raw > 255);
+        el.classList.toggle("clip-low", raw < 0);
+        el.title = raw === v
+          ? `Output (row ${r}, col ${c}) = ${v}`
+          : `Output (row ${r}, col ${c}): raw sum ${fmt(raw)} → shown as ${v}`;
+      });
+    }
+
+    function renderInspector() {
+      const { row, col } = state.selected;
+      $("insp-title").textContent = `pixel (row ${row}, col ${col})`;
+      const body = $("insp-body");
+
+      if (!Conv) {
+        body.innerHTML = `<p class="text-sm text-slate-500">The step-by-step math appears here once <code>filter-engine/convolution.js</code> is available.</p>`;
+        return;
+      }
+      let info;
+      try {
+        info = Conv.explainCell(state.grid, activeKernel(), row, col);
+      } catch (err) {
+        console.error("explainCell failed:", err);
+        body.innerHTML = `<p class="text-sm text-red-600">Could not explain this pixel (see console).</p>`;
+        return;
+      }
+
+      const steps = info.steps.slice().sort((a, b) => a.kernelRow - b.kernelRow || a.kernelCol - b.kernelCol);
+      const cellsHtml = steps.map(stepHtml).join("");
+      const clipped = info.sum < 0 || info.sum > 255;
+      const clampNote = clipped
+        ? `<span class="text-xs font-medium ${info.sum > 255 ? "text-amber-600" : "text-sky-600"}">clipped to ${info.sum > 255 ? "255" : "0"}</span>`
+        : `<span class="text-xs text-slate-500">already in 0&ndash;255</span>`;
+
+      body.innerHTML = `
+        <p class="mb-2 text-xs text-slate-500">input pixel &times; kernel weight = product</p>
+        <div class="grid grid-cols-3 gap-1.5">${cellsHtml}</div>
+        <div class="mt-4 space-y-2 text-sm">
+          <div class="flex items-center justify-between rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+            <span class="text-slate-600">Sum of 9 products</span>
+            <span class="font-bold tabular-nums text-slate-900">${fmt(info.sum)}</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+            <span class="text-slate-600">Display value</span>
+            <span class="flex items-center gap-2">
+              ${clampNote}
+              <span class="h-5 w-5 rounded ring-1 ring-slate-300" style="background:${gray(info.clamped)}"></span>
+              <span class="font-bold tabular-nums text-slate-900">${info.clamped}</span>
+            </span>
+          </div>
+        </div>
+        ${info.text ? `<details class="mt-3 text-xs text-slate-500"><summary class="cursor-pointer select-none hover:text-slate-700">Full calculation as text</summary><pre class="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">${escapeHtml(info.text)}</pre></details>` : ""}
+      `;
+    }
+
+    function stepHtml(s) {
+      if (s.outOfBounds) {
+        return `<div class="rounded-lg bg-slate-100 px-1 py-2 text-center text-[11px] leading-tight text-slate-400 border border-dashed border-slate-300" title="Outside the image: treated as 0 (zero padding)">
+          <div class="tabular-nums">0 &times; ${fmtWeight(s.weight)}</div>
+          <div class="mt-0.5 tabular-nums">= 0</div>
+          <div class="mt-0.5 text-[10px] uppercase tracking-wide">pad</div>
+        </div>`;
+      }
+      const wCls = s.weight > 0 ? "text-emerald-700" : s.weight < 0 ? "text-rose-700" : "text-slate-400";
+      const pCls = s.product === 0 ? "text-slate-400" : "text-slate-900";
+      return `<div class="rounded-lg bg-white px-1 py-2 text-center text-[11px] leading-tight ring-1 ring-slate-200" title="Input (row ${s.gridRow}, col ${s.gridCol})">
+        <div class="tabular-nums"><span class="font-semibold text-slate-700">${s.pixel}</span> &times; <span class="font-semibold ${wCls}">${fmtWeight(s.weight)}</span></div>
+        <div class="mt-0.5 font-bold tabular-nums ${pCls}">= ${fmt(s.product)}</div>
+        <div class="mt-0.5 text-[10px] text-slate-400">r${s.gridRow} c${s.gridCol}</div>
+      </div>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+
+    function renderPresetInfo() {
+      const p = state.presetId && Presets[state.presetId];
+      $("preset-info").textContent = p ? `${p.name}: ${p.description}` : "Your own drawing.";
+    }
+
+    function renderMode() {
+      const drawing = state.mode === "draw";
+      $("mode-draw").setAttribute("aria-pressed", String(drawing));
+      $("mode-inspect").setAttribute("aria-pressed", String(!drawing));
+      inputGridEl.classList.toggle("drawable", drawing);
+      inputGridEl.classList.toggle("inspectable", !drawing);
+      $("input-hint").textContent = drawing
+        ? "Click a pixel to flip it, or drag to paint."
+        : "Click a pixel to inspect the output at that position.";
+    }
+
+    function renderAll() {
+      renderInput();
+      renderOutput();
+      renderInspector();
+    }
+
+    // ---------- State changes ----------
+    function setKernel(id) {
+      state.kernelId = id;
+      renderKernel();
+      renderOutput();
+      renderInspector();
+    }
+
+    function select(row, col) {
+      if (!inBounds(row, col)) return;
+      if (state.selected.row === row && state.selected.col === col) return;
+      state.selected = { row, col };
+      renderInput();
+      renderOutput();
+      renderInspector();
+    }
+
+    function paint(row, col, value) {
+      if (!inBounds(row, col) || state.grid[row][col] === value) return;
+      state.grid[row][col] = value;
+      if (state.presetId) {
+        state.presetId = null;
+        renderPresetInfo();
+      }
+      renderAll();
+    }
+
+    function loadPreset(id) {
+      const p = Presets[id];
+      if (!p) return;
+      state.grid = copyGrid(p.grid);   // deep copy: never mutate PRESET_GRIDS
+      state.presetId = id;
+      renderPresetInfo();
+      renderAll();
+    }
+
+    function clearGrid() {
+      state.grid = emptyGrid();
+      state.presetId = null;
+      renderPresetInfo();
+      renderAll();
+    }
+
+    // ---------- Pointer handling ----------
+    function cellAt(x, y) {
+      const el = document.elementFromPoint(x, y);
+      return el ? el.closest(".cell") : null;
+    }
+
+    function onInputPointerDown(e) {
+      const cell = e.target.closest(".cell");
+      if (!cell || (e.pointerType === "mouse" && e.button !== 0)) return;
+      e.preventDefault();
+      const r = +cell.dataset.r, c = +cell.dataset.c;
+      if (state.mode === "inspect") {
+        state.pointer = { kind: "inspect", grid: "input" };
+        select(r, c);
+        return;
+      }
+      const value = state.grid[r][c] === 0 ? 255 : 0;
+      state.pointer = { kind: "paint", value };
+      paint(r, c, value);
+    }
+
+    function onOutputPointerDown(e) {
+      const cell = e.target.closest(".cell");
+      if (!cell || (e.pointerType === "mouse" && e.button !== 0)) return;
+      e.preventDefault();
+      state.pointer = { kind: "inspect", grid: "output" };
+      select(+cell.dataset.r, +cell.dataset.c);
+    }
+
+    function onPointerMove(e) {
+      if (!state.pointer) return;
+      const cell = cellAt(e.clientX, e.clientY);
+      if (!cell) return;
+      const r = +cell.dataset.r, c = +cell.dataset.c;
+      if (state.pointer.kind === "paint") {
+        if (cell.dataset.kind === "input") paint(r, c, state.pointer.value);
+      } else if (cell.dataset.kind === state.pointer.grid) {
+        select(r, c);
+      }
+    }
+
+    function stopPointer() {
+      state.pointer = null;
+    }
+
+    // ---------- Wiring ----------
+    function wireEvents() {
+      inputGridEl.addEventListener("pointerdown", onInputPointerDown);
+      outputGridEl.addEventListener("pointerdown", onOutputPointerDown);
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", stopPointer);
+      window.addEventListener("pointercancel", stopPointer);
+      window.addEventListener("blur", stopPointer);
+
+      document.querySelectorAll(".preset-btn").forEach((b) => {
+        b.addEventListener("click", () => loadPreset(b.dataset.preset));
+      });
+      $("clear-btn").addEventListener("click", clearGrid);
+      $("show-values").addEventListener("change", (e) => {
+        state.showValues = e.target.checked;
+        renderInput();
+      });
+      $("mode-draw").addEventListener("click", () => { state.mode = "draw"; renderMode(); });
+      $("mode-inspect").addEventListener("click", () => { state.mode = "inspect"; renderMode(); });
+    }
+
+    // ---------- Init ----------
+    function init() {
+      if (!Conv) $("engine-banner").hidden = false;
+      buildGrid(inputGridEl, inputCells, "input");
+      buildGrid(outputGridEl, outputCells, "output");
+      buildKernelPills();
+      wireEvents();
+      renderMode();
+      renderKernel();
+      if (Presets.smiley) {
+        loadPreset("smiley");
+      } else {
+        renderPresetInfo();
+        renderAll();
+      }
+    }
+
+    init();
+  })();
+  </script>
+</body>
+</html>
